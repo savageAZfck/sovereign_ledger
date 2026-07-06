@@ -16,8 +16,8 @@ No fintech, SaaS, or critical compliance organization today offers this level of
 Deploy as the foundational log and compliance layer for banking, capital markets, insurance, or critical SaaS—no integration hell, no compliance anxiety, and no secrets left unprotected.
 Build & Run
 Sh
-1cargo build
-2cargo run
+cargo build
+cargo run
 On Linux/macOS, use sudo or raise RLIMIT_MEMLOCK for full RAM pinning.
 License: Proprietary – (c) 2026 Adam Clark
 Contact: savagetism@icloud.com
