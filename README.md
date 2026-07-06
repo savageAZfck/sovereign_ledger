@@ -33,3 +33,9 @@
 ```sh
 cargo build
 cargo run
+On Linux/macOS with strict memory safety, run as root or use a raised RLIMIT_MEMLOCK for max mlock RAM pinning:
+Sh
+1sudo cargo run
+License
+Proprietary — (c) 2026 Adam Clark
+Contact: savagetism@icloud.com for licensing or partnership.
