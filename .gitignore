@@ -1,0 +1,14 @@
+# Generated files
+/target
+**/*.rs.bk
+
+# IDEs/editors
+*.swp
+*.swo
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# Byproducts
+Cargo.lock
