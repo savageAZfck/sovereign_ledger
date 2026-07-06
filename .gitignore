@@ -1,14 +1,7 @@
-# Generated files
-/target
-**/*.rs.bk
+Rust/Cargo 
+/target **/*.rs.bk
+IDE/Editor junk 
+*.swp *.swo .DS_Store .idea/ .vscode/
+Byproduct files 
+*.log Cargo.lock
 
-# IDEs/editors
-*.swp
-*.swo
-.DS_Store
-.idea/
-.vscode/
-*.log
-
-# Byproducts
-Cargo.lock
