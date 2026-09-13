@@ -531,7 +531,7 @@ fn journald_import_realistic_records() {
     // Garbage input fails closed.
     let bad = temp_path("journald_bad.jsonl");
     write_lines(&bad, &[r#"{"not": "closed"#.to_string()]);
-    let mut ledger2 = SovereignLedger::new(&temp_path("journald_out2.jsonl"), Some(b"s")).unwrap();
+    let mut ledger2 = SovereignLedger::new(temp_path("journald_out2.jsonl"), Some(b"s")).unwrap();
     let reader = BufReader::new(fs::File::open(&bad).unwrap());
     assert!(sovereign_ledger::import::import_journald(reader, &mut ledger2).is_err());
 
