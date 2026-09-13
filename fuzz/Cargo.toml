@@ -23,3 +23,9 @@ name = "parse_event"
 path = "fuzz_targets/parse_event.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "seal_record"
+path = "fuzz_targets/seal_record.rs"
+test = false
+doc = false

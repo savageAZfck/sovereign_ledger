@@ -6,6 +6,13 @@ to the one before it; an RFC 6962 Merkle tree over the entry hashes gives
 inclusion and consistency proofs; an anchor interface seals the tip under
 an external key — including a Secure Enclave identity on macOS.
 
+**v0.3: sealing + public verification.** `seal` closes a segment: it
+publishes that segment's derived key and binds the segment's Merkle root
+under an anchor signature. `verify --public` then verifies the whole sealed
+history with **no secret material** — a third party can audit the file with
+only the public key. See `THREAT_MODEL.md` for the security model and
+`AUDITING.md` for the verifier's guide.
+
 Derived from the audit core of Bad Apple and battle-tested against its
 production ledger history (three legacy on-disk formats, ~7k live entries).
 
@@ -39,7 +46,11 @@ production ledger history (three legacy on-disk formats, ~7k live entries).
   it and bound the window going forward.
 - **Resistance to an attacker holding your seeds.** Keyed chains stop
   silent edits; they do not stop someone with the keyring from rewriting
-  and re-signing. That is what anchors are for.
+  and re-signing. Sealed segments are immune — their integrity rests on
+  the anchor signature, not key secrecy. Unsealed tails are not.
+- **The unsealed tail.** Entries after the last seal are linkage-checked
+  but not publicly verifiable. Seal on a schedule; tail integrity until
+  then is carried by the live key.
 - **Replication or rotation.** One append-only file per ledger. Archival
   and multi-node sync are intentionally out of scope.
 - **Sub-second ordering.** `ts` is seconds; ordering is carried by `seq`.
@@ -63,6 +74,16 @@ v2 (current):
 - Genesis `prev_hash` is 32 zero bytes.
 - Merkle leaves are the raw 32-byte entry hashes; tree hash follows
   RFC 6962 (`SHA256(0x00 || leaf)`, `SHA256(0x01 || left || right)`).
+- **Segments**: v3 entries in segment `s` authenticate under
+  `HMAC(base_key, "sovereign-segment-v1" || s:u64le)` — an independent PRF
+  output per segment, so a revealed key exposes nothing about the open
+  segment's key. Pre-v3 entries in segment 0 authenticate under the epoch
+  base directly; sealing such a segment publishes the base, after which
+  appends under that epoch require `rotate_key`. A `sovereign:seal` event
+  (itself a normal v3 entry) opens the next segment. Seal bodies carry
+  `{segment, start_seq, end_seq, tip_hash, merkle_root,
+  revealed:{epoch→key}, prev_seal, scheme, public_key, signature,
+  payload}`.
 
 ## Library
 
@@ -93,13 +114,16 @@ Multi-epoch open: `SovereignLedger::open_with_seeds(path, &[seed0, seed1])`.
 ## Anchors
 
 ```rust
-use sovereign_ledger::anchor::{Anchor, IdentityAgentAnchor, FileKeyAnchor, Tip};
+use sovereign_ledger::anchor::{Anchor, Ed25519FileAnchor, FileKeyAnchor, IdentityAgentAnchor, Tip};
 
 // Hardware: Bad Apple's Secure Enclave identity agent over its unix socket.
 let anchor = IdentityAgentAnchor::default_socket();
 
-// Software fallback: a standalone HMAC key file (symmetric — whoever can
-// verify can also forge; fine for offline/test, not a hardware anchor).
+// Asymmetric software anchor: Ed25519 seed file. Publicly verifiable —
+// preferred standalone anchor.
+let anchor = Ed25519FileAnchor::from_file("anchor.seed")?;
+
+// Symmetric fallback: HMAC key file (whoever can verify can also forge).
 let anchor = FileKeyAnchor::from_file("anchor.key")?;
 
 let checkpoint = anchor.attest(&tip)?;
@@ -108,6 +132,21 @@ anchor.verify(&checkpoint)?;   // enclave path calls back into the agent
 
 Checkpoints store the verbatim signed payload plus the Merkle root, and
 read back checkpoints written by older tooling.
+
+## Sealing
+
+```rust
+use sovereign_ledger::seal;
+
+// Close the current segment; the seal is the first entry of the next.
+ledger.seal(&anchor)?;   // anchor must impl SealSigner
+
+// Any reader can now verify sealed history with no keys:
+let report = seal::verify_public(reader)?;   // sealed vs unsealed counts
+```
+
+Seal on a schedule (cron/launchd) — each seal turns the live segment into
+a publicly verifiable artifact and advances the segment key.
 
 ## CLI
 
@@ -119,6 +158,8 @@ sovereign_ledger audit.jsonl init
 sovereign_ledger audit.jsonl append query "hello"
 echo body | sovereign_ledger audit.jsonl append query -
 sovereign_ledger audit.jsonl verify [--json]
+sovereign_ledger audit.jsonl verify --public   # no keys; sealed segments
+sovereign_ledger audit.jsonl seal [--agent sock | --ed25519-key-file k | --ed25519-gen-key-file k]
 sovereign_ledger audit.jsonl tail -n 20 [-f]
 sovereign_ledger audit.jsonl export --format cef    # SIEM-ready
 sovereign_ledger audit.jsonl import --from badapple --source ledger.jsonl

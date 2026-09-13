@@ -48,3 +48,4 @@ jobs:
       - run: cargo install cargo-fuzz
       - run: cargo fuzz run parse_event -- -runs=20000
       - run: cargo fuzz run verify_proofs -- -runs=20000
+      - run: cargo fuzz run seal_record -- -runs=20000

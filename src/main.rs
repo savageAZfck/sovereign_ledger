@@ -1,6 +1,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use sovereign_ledger::anchor::{write_checkpoint, Anchor, FileKeyAnchor, IdentityAgentAnchor, Tip};
+use sovereign_ledger::anchor::{
+    write_checkpoint, Anchor, Ed25519FileAnchor, FileKeyAnchor, IdentityAgentAnchor, Tip,
+};
 use sovereign_ledger::import;
+use sovereign_ledger::seal::{self, SealSigner};
 use sovereign_ledger::{Error, SovereignLedger};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -59,8 +62,30 @@ enum Commands {
         #[arg(long)]
         durable: bool,
     },
-    /// Verify the entire hash chain
-    Verify,
+    /// Verify the entire hash chain. With no key material, sealed segments
+    /// are verified publicly via revealed keys and anchor signatures.
+    Verify {
+        /// Public verification: no keys, sealed segments only
+        #[arg(long)]
+        public: bool,
+    },
+    /// Seal the open segment: reveal its derived key and sign the
+    /// segment's Merkle root, making it publicly verifiable
+    Seal {
+        /// Identity agent socket (Secure Enclave; default
+        /// /var/run/badapple/identity.sock)
+        #[arg(long)]
+        agent: Option<PathBuf>,
+        /// Ed25519 anchor seed file (publicly verifiable seals)
+        #[arg(long)]
+        ed25519_key_file: Option<PathBuf>,
+        /// Generate a fresh Ed25519 anchor seed and use it
+        #[arg(long)]
+        ed25519_gen_key_file: Option<PathBuf>,
+        /// Software HMAC key file (seals not publicly verifiable)
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
     /// Print the last N events, optionally following new appends
     Tail {
         #[arg(short = 'n', default_value_t = 10)]
@@ -130,6 +155,12 @@ enum Commands {
         /// /var/run/badapple/identity.sock)
         #[arg(long)]
         agent: Option<PathBuf>,
+        /// Ed25519 anchor seed file (publicly verifiable checkpoints)
+        #[arg(long)]
+        ed25519_key_file: Option<PathBuf>,
+        /// Generate a fresh Ed25519 anchor seed and use it
+        #[arg(long)]
+        ed25519_gen_key_file: Option<PathBuf>,
         /// Software HMAC key file (fallback when no agent is available)
         #[arg(long)]
         key_file: Option<PathBuf>,
@@ -150,6 +181,9 @@ enum Commands {
         checkpoint: PathBuf,
         #[arg(long)]
         agent: Option<PathBuf>,
+        /// Ed25519 anchor seed file
+        #[arg(long)]
+        ed25519_key_file: Option<PathBuf>,
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
@@ -204,11 +238,48 @@ fn ledger_tip(cli: &Cli, genesis: &str) -> Result<Tip, Error> {
     })
 }
 
+fn pick_seal_signer(
+    agent: Option<PathBuf>,
+    ed25519_key_file: Option<PathBuf>,
+    ed25519_gen_key_file: Option<PathBuf>,
+    key_file: Option<PathBuf>,
+) -> Result<Box<dyn SealSigner>, Error> {
+    if let Some(p) = ed25519_gen_key_file {
+        return Ok(Box::new(Ed25519FileAnchor::generate(p)?));
+    }
+    if let Some(p) = ed25519_key_file {
+        return Ok(Box::new(Ed25519FileAnchor::from_file(p)?));
+    }
+    if let Some(p) = key_file {
+        return Ok(Box::new(FileKeyAnchor::from_file(p)?));
+    }
+    let sock = agent.unwrap_or_else(|| PathBuf::from("/var/run/badapple/identity.sock"));
+    let a = IdentityAgentAnchor::new(sock);
+    if a.is_available() {
+        Ok(Box::new(a))
+    } else {
+        Err(Error::Anchor(
+            "no seal signer available: identity agent socket absent; use \
+             --ed25519-key-file <path> or --ed25519-gen-key-file <path> for a \
+             publicly verifiable anchor, or --key-file for an HMAC anchor"
+                .into(),
+        ))
+    }
+}
+
 fn pick_anchor(
     agent: Option<PathBuf>,
+    ed25519_key_file: Option<PathBuf>,
+    ed25519_gen_key_file: Option<PathBuf>,
     key_file: Option<PathBuf>,
     gen_key_file: Option<PathBuf>,
 ) -> Result<Box<dyn Anchor>, Error> {
+    if let Some(p) = ed25519_gen_key_file {
+        return Ok(Box::new(Ed25519FileAnchor::generate(p)?));
+    }
+    if let Some(p) = ed25519_key_file {
+        return Ok(Box::new(Ed25519FileAnchor::from_file(p)?));
+    }
     if let Some(p) = gen_key_file {
         return Ok(Box::new(FileKeyAnchor::generate(p)?));
     }
@@ -265,7 +336,49 @@ fn run(cli: Cli) -> Result<(), Error> {
                 println!("appended entry {seq}");
             }
         }
-        Commands::Verify => {
+        Commands::Verify { public } => {
+            let seeds = gather_seeds(&cli)?;
+            if *public || seeds.is_empty() {
+                // Public verification: no key material. Requires seals.
+                let file = fs::File::open(&cli.path)?;
+                let report = seal::verify_public(BufReader::new(file))?;
+                if report.segments == 0 {
+                    return Err(Error::Verification(
+                        "no seal records found; public verification requires a \
+                         sealed ledger — use --key for full verification or run \
+                         `seal` first"
+                            .into(),
+                    ));
+                }
+                if cli.json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "valid": true,
+                            "mode": "public",
+                            "segments": report.segments,
+                            "sealed_entries": report.sealed_entries,
+                            "unsealed_entries": report.unsealed_entries,
+                            "scheme": report.scheme,
+                            "public_key": report.public_key,
+                        })
+                    );
+                } else {
+                    println!(
+                        "chain valid ({} sealed entries in {} segments, {} unsealed)",
+                        report.sealed_entries, report.segments, report.unsealed_entries
+                    );
+                    if report.unsealed_entries > 0 {
+                        eprintln!(
+                            "note: {} trailing entries are unsealed — they are \
+                             linkage-checked but not publicly verifiable until \
+                             the next `seal`",
+                            report.unsealed_entries
+                        );
+                    }
+                }
+                return Ok(());
+            }
             let ledger = open(&cli)?;
             ledger.verify()?;
             if cli.json {
@@ -280,6 +393,46 @@ fn run(cli: Cli) -> Result<(), Error> {
                 );
             } else {
                 println!("chain valid ({} entries)", ledger.len());
+            }
+        }
+        Commands::Seal {
+            agent,
+            ed25519_key_file,
+            ed25519_gen_key_file,
+            key_file,
+        } => {
+            let signer = pick_seal_signer(
+                agent.clone(),
+                ed25519_key_file.clone(),
+                ed25519_gen_key_file.clone(),
+                key_file.clone(),
+            )?;
+            let mut ledger = open(&cli)?;
+            match ledger.seal(signer.as_ref())? {
+                Some(seq) => {
+                    ledger.sync()?;
+                    if cli.json {
+                        println!(
+                            "{}",
+                            serde_json::json!({"sealed_through": ledger.len() - 1, "seal_seq": seq, "segment": ledger.segment() - 1})
+                        );
+                    } else {
+                        println!(
+                            "sealed segment {} through seq {} at seq {}",
+                            ledger.segment() - 1,
+                            seq - 1,
+                            seq
+                        );
+                    }
+                    if ledger.needs_rotation() {
+                        eprintln!(
+                            "warning: segment 0 predates per-segment keys — the \
+                             epoch-0 base key is now public; run `rotate` before \
+                             appending more entries"
+                        );
+                    }
+                }
+                None => println!("nothing to seal"),
             }
         }
         Commands::Tail { count, follow } => {
@@ -493,12 +646,20 @@ fn run(cli: Cli) -> Result<(), Error> {
         }
         Commands::Anchor {
             agent,
+            ed25519_key_file,
+            ed25519_gen_key_file,
             key_file,
             gen_key_file,
             out,
             genesis,
         } => {
-            let anchor = pick_anchor(agent.clone(), key_file.clone(), gen_key_file.clone())?;
+            let anchor = pick_anchor(
+                agent.clone(),
+                ed25519_key_file.clone(),
+                ed25519_gen_key_file.clone(),
+                key_file.clone(),
+                gen_key_file.clone(),
+            )?;
             let tip = ledger_tip(&cli, genesis)?;
             let checkpoint = anchor.attest(&tip)?;
             let out_path = out.clone().unwrap_or_else(|| {
@@ -515,11 +676,18 @@ fn run(cli: Cli) -> Result<(), Error> {
         Commands::AnchorVerify {
             checkpoint,
             agent,
+            ed25519_key_file,
             key_file,
         } => {
             let c: sovereign_ledger::anchor::Checkpoint =
                 serde_json::from_str(&fs::read_to_string(checkpoint)?)?;
-            let anchor = pick_anchor(agent.clone(), key_file.clone(), None)?;
+            let anchor = pick_anchor(
+                agent.clone(),
+                ed25519_key_file.clone(),
+                key_file.clone(),
+                None,
+                None,
+            )?;
             if anchor.verify(&c)? {
                 println!("checkpoint valid");
             } else {

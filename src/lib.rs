@@ -15,12 +15,18 @@ use zeroize::Zeroize;
 pub mod anchor;
 pub mod import;
 pub mod merkle;
+pub mod seal;
 
 pub const HASH_SIZE: usize = 32;
-/// Current on-disk entry format version.
-pub const FORMAT_VERSION: u32 = 2;
+/// Current on-disk entry format version. Version 3 uses per-segment key
+/// derivation (`segment_key`); versions ≤ 2 authenticate under the epoch
+/// base key directly.
+pub const FORMAT_VERSION: u32 = 3;
 /// Special event type recorded when a ledger rotates to a new key epoch.
 pub const KEY_ROTATION_EVENT: &str = "sovereign:key-rotation";
+/// Event type recorded by `seal()`: closes a segment, reveals its derived
+/// key, and binds the segment's Merkle root under an anchor signature.
+pub const SEAL_EVENT: &str = "sovereign:seal";
 
 #[derive(Debug)]
 pub enum Error {
@@ -141,6 +147,49 @@ impl Key {
     pub fn as_bytes(&self) -> &[u8] {
         &*self.data
     }
+
+    pub(crate) fn from_bytes(bytes: [u8; HASH_SIZE]) -> Self {
+        let mut data = Box::new(bytes);
+        pin_bytes(data.as_mut_ptr(), HASH_SIZE);
+        Self { data }
+    }
+}
+
+/// Per-segment key derivation: entries in segment `s` authenticate under
+/// `HMAC-SHA256(base, "sovereign-segment-v1" || s:u64le)`. Each segment's
+/// key is an independent PRF output — a seal that publishes segment `s`'s
+/// key reveals nothing about any other segment's key, including the open
+/// one. (An iterated ratchet `k_{s+1} = HMAC(k_s, …)` would instead make
+/// every future key publicly derivable from the first revealed key.)
+pub(crate) fn segment_key(base: &[u8; HASH_SIZE], segment: u64) -> [u8; HASH_SIZE] {
+    let mut m = <Hmac<Sha256> as Mac>::new_from_slice(base)
+        .unwrap_or_else(|_| unreachable!("HMAC accepts any key length"));
+    m.update(b"sovereign-segment-v1");
+    m.update(&segment.to_le_bytes());
+    let out = m.finalize().into_bytes();
+    let mut k = [0u8; HASH_SIZE];
+    k.copy_from_slice(&out);
+    k
+}
+
+/// The key an entry was written under. Entries with `version` ≤ 2 were
+/// written by pre-sealing code and authenticate under the epoch base key
+/// directly; version ≥ 3 entries authenticate under the per-segment key
+/// for the segment containing them. A seal event is the first entry of
+/// the segment it opens, so its own segment index counts it.
+fn entry_key(base_keys: &[Key], epoch: u32, seals_seen: u64, version: u32) -> Result<Key, Error> {
+    let base = base_keys
+        .get(epoch as usize)
+        .ok_or(Error::MissingKey(epoch))?;
+    if version < 3 {
+        return Ok(Key::from_bytes(
+            base.as_bytes().try_into().expect("key size"),
+        ));
+    }
+    Ok(Key::from_bytes(segment_key(
+        base.as_bytes().try_into().expect("key size"),
+        seals_seen,
+    )))
 }
 
 impl Drop for Key {
@@ -229,7 +278,7 @@ fn event_hash_v2(
     digest
 }
 
-fn event_hash(
+pub(crate) fn event_hash(
     version: u32,
     prev_hash: &[u8; HASH_SIZE],
     seq: u64,
@@ -240,12 +289,14 @@ fn event_hash(
 ) -> Result<[u8; HASH_SIZE], Error> {
     match version {
         1 => Ok(event_hash_v1(prev_hash, seq, ts, event_type, body, key)),
-        2 => Ok(event_hash_v2(prev_hash, seq, ts, event_type, body, key)),
+        // v3 changes only key derivation (per-segment); the MAC
+        // construction is identical to v2.
+        2 | 3 => Ok(event_hash_v2(prev_hash, seq, ts, event_type, body, key)),
         v => Err(Error::UnsupportedVersion(v)),
     }
 }
 
-fn decode_hash(s: &str) -> Option<[u8; HASH_SIZE]> {
+pub(crate) fn decode_hash(s: &str) -> Option<[u8; HASH_SIZE]> {
     match hex::decode(s) {
         Ok(v) if v.len() == HASH_SIZE => v.try_into().ok(),
         _ => None,
@@ -291,6 +342,18 @@ pub struct SovereignLedger {
     last_hash: [u8; HASH_SIZE],
     seq: u64,
     epoch: u32,
+    /// Number of seal events recorded — the current segment index. Each
+    /// segment authenticates under its own derived key.
+    seals_seen: u64,
+    /// Highest seq covered by a seal — the boundary of the open segment.
+    sealed_through: u64,
+    /// Segment 0 contains pre-v3 entries (keyed under the epoch base
+    /// directly). Sealing such a segment reveals a base key, so appends
+    /// under a revealed epoch are refused until `rotate_key` moves to a
+    /// fresh seed.
+    legacy_segment0: bool,
+    /// Epochs whose base key has been published by a seal.
+    revealed_epochs: std::collections::HashSet<u32>,
     read_only: AtomicBool,
     compromised: AtomicBool,
     durable: AtomicBool,
@@ -346,7 +409,12 @@ impl SovereignLedger {
         let mut last_hash = [0u8; HASH_SIZE];
         let mut seq = 0u64;
         let mut max_epoch = 0u32;
+        let mut seals_seen = 0u64;
+        let mut sealed_through = 0u64;
         let mut compromised = false;
+        let mut legacy_segment0 = false;
+        let mut seg0_epochs = std::collections::HashSet::new();
+        let mut revealed_epochs = std::collections::HashSet::new();
 
         if path.exists() {
             let file = File::open(&path)?;
@@ -360,9 +428,25 @@ impl SovereignLedger {
                     Ok(e) => e,
                     Err(e) => return Err(Error::InvalidLine(idx, e.to_string())),
                 };
-                let key = keys
-                    .get(event.epoch as usize)
-                    .ok_or(Error::MissingKey(event.epoch))?;
+                if seals_seen == 0 {
+                    if event.v < 3 {
+                        legacy_segment0 = true;
+                    }
+                    seg0_epochs.insert(event.epoch);
+                }
+                // A seal event is the first entry of the segment it opens:
+                // count it, then authenticate under the new segment key.
+                if event.event_type == SEAL_EVENT {
+                    seals_seen += 1;
+                    let seal = seal::parse_body(&event.body)
+                        .map_err(|e| Error::InvalidLine(idx, e.to_string()))?;
+                    sealed_through = sealed_through.max(seal.end_seq);
+                    // Sealing a legacy segment 0 published its base keys.
+                    if legacy_segment0 && seals_seen == 1 {
+                        revealed_epochs.extend(seg0_epochs.iter().copied());
+                    }
+                }
+                let key = entry_key(&keys, event.epoch, seals_seen, event.v)?;
 
                 let prev_hash: [u8; HASH_SIZE] = match decode_hash(&event.prev_hash) {
                     Some(h) => h,
@@ -380,7 +464,7 @@ impl SovereignLedger {
                     event.ts,
                     &event.event_type,
                     &event.body,
-                    key,
+                    &key,
                 )?;
                 let expected_hex = hex::encode(expected);
                 if event.hash != expected_hex {
@@ -401,6 +485,10 @@ impl SovereignLedger {
             last_hash,
             seq,
             epoch: max_epoch,
+            seals_seen,
+            sealed_through,
+            legacy_segment0,
+            revealed_epochs,
             read_only: AtomicBool::new(false),
             compromised: AtomicBool::new(compromised),
             durable: AtomicBool::new(false),
@@ -440,20 +528,32 @@ impl SovereignLedger {
         if self.read_only.load(Ordering::SeqCst) {
             return Err(Error::ReadOnly);
         }
-        let key = self
-            .keys
-            .get(self.epoch as usize)
-            .ok_or(Error::MissingKey(self.epoch))?;
+        if self.revealed_epochs.contains(&self.epoch) {
+            return Err(Error::Verification(format!(
+                "epoch {} key was published by a seal; rotate to a fresh \
+                 seed before appending",
+                self.epoch
+            )));
+        }
+        // A ledger whose segment 0 predates v3 keeps writing v2 entries
+        // (keyed under the base) until the first seal; everything else
+        // uses per-segment keys.
+        let v = if self.seals_seen == 0 && self.legacy_segment0 {
+            2
+        } else {
+            FORMAT_VERSION
+        };
+        let key = entry_key(&self.keys, self.epoch, self.seals_seen, v)?;
 
         let ts = now();
         let next_seq = self
             .seq
             .checked_add(1)
             .ok_or_else(|| Error::Verification("sequence overflow".into()))?;
-        let hash = event_hash_v2(&self.last_hash, next_seq, ts, event_type, body, key);
+        let hash = event_hash_v2(&self.last_hash, next_seq, ts, event_type, body, &key);
 
         let event = Event {
-            v: FORMAT_VERSION,
+            v,
             seq: next_seq,
             ts,
             event_type: event_type.to_string(),
@@ -496,18 +596,26 @@ impl SovereignLedger {
     }
 
     /// Re-read the ledger and verify the entire chain. Streams entries, so
-    /// memory use stays flat regardless of ledger size.
+    /// memory use stays flat regardless of ledger size. Entries are
+    /// authenticated under the derived key for their segment, and seal
+    /// bodies are sanity-checked against the segments they claim to cover.
     pub fn verify(&self) -> Result<(), Error> {
         if !self.path.exists() {
             return Ok(());
         }
         let mut last_hash = [0u8; HASH_SIZE];
+        let mut seals_seen = 0u64;
+        let mut seg0_had_legacy = false;
         for (idx, item) in self.iter()?.enumerate() {
             let event = item?;
-            let key = self
-                .keys
-                .get(event.epoch as usize)
-                .ok_or(Error::MissingKey(event.epoch))?;
+            let is_seal = event.event_type == SEAL_EVENT;
+            if seals_seen == 0 && event.v < 3 {
+                seg0_had_legacy = true;
+            }
+            if is_seal {
+                seals_seen += 1;
+            }
+            let key = entry_key(&self.keys, event.epoch, seals_seen, event.v)?;
             let prev_hash: [u8; HASH_SIZE] = match decode_hash(&event.prev_hash) {
                 Some(h) => h,
                 None => return Err(Error::InvalidLine(idx, "bad prev_hash".into())),
@@ -522,14 +630,137 @@ impl SovereignLedger {
                 event.ts,
                 &event.event_type,
                 &event.body,
-                key,
+                &key,
             )?;
             if event.hash != hex::encode(expected) {
                 return Err(Error::BrokenChain(idx));
             }
             last_hash = expected;
+            if is_seal {
+                // A seal must honestly disclose the keys for the segment
+                // it closes; a wrong reveal is itself tamper. A legacy
+                // segment 0 authenticates under the epoch base directly.
+                let record = seal::parse_body(&event.body)
+                    .map_err(|e| Error::InvalidLine(idx, e.to_string()))?;
+                for (e, revealed_hex) in &record.revealed {
+                    let base = self.keys.get(*e as usize).ok_or(Error::MissingKey(*e))?;
+                    let base_bytes: &[u8; HASH_SIZE] =
+                        base.as_bytes().try_into().expect("key size");
+                    let expected = if record.segment == 0 && seg0_had_legacy {
+                        *base_bytes
+                    } else {
+                        segment_key(base_bytes, record.segment)
+                    };
+                    if decode_hash(revealed_hex) != Some(expected) {
+                        return Err(Error::Verification(format!(
+                            "seal at line {idx} reveals a wrong key for epoch {e}"
+                        )));
+                    }
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Current segment index — the number of seal events recorded.
+    pub fn segment(&self) -> u64 {
+        self.seals_seen
+    }
+
+    /// The current epoch's base key was published by a seal (possible only
+    /// on ledgers whose segment 0 predates v3). Appends are refused until
+    /// `rotate_key` brings in a fresh seed.
+    pub fn needs_rotation(&self) -> bool {
+        self.revealed_epochs.contains(&self.epoch)
+    }
+
+    /// Close the open segment: reveal its per-segment key and bind the
+    /// segment's Merkle root under `signer`'s asymmetric (or file-key)
+    /// signature. The seal itself is the first entry of the next segment.
+    /// Returns the seal's seq, or `Ok(None)` when there is nothing new to
+    /// seal. A ledger with no anchor signature available cannot seal.
+    ///
+    /// On a legacy (pre-v3) segment 0 the published key *is* the epoch
+    /// base — sealing makes it public, so subsequent appends under that
+    /// epoch are refused until `rotate_key` brings in a fresh seed.
+    pub fn seal(&mut self, signer: &dyn seal::SealSigner) -> Result<Option<u64>, Error> {
+        if self.compromised.load(Ordering::SeqCst) {
+            return Err(Error::Compromised);
+        }
+        let start_seq = self.sealed_through + 1;
+        let end_seq = self.seq;
+        if end_seq < start_seq {
+            return Ok(None);
+        }
+
+        // Collect the segment's leaf hashes and epochs used, and capture
+        // the previous seal's hash so seals are linked in order.
+        let mut leaves = Vec::new();
+        let mut epochs = std::collections::BTreeMap::new();
+        let mut prev_seal = String::new();
+        let mut has_nonseal = false;
+        for item in self.iter()? {
+            let event = item?;
+            if event.seq < start_seq || event.seq > end_seq {
+                continue;
+            }
+            if event.event_type == SEAL_EVENT {
+                prev_seal = event.hash.clone();
+            } else {
+                has_nonseal = true;
+            }
+            leaves.push(
+                decode_hash(&event.hash)
+                    .ok_or_else(|| Error::Verification("bad stored hash".into()))?,
+            );
+            if let std::collections::btree_map::Entry::Vacant(e) = epochs.entry(event.epoch) {
+                let seg_v = if self.seals_seen == 0 && self.legacy_segment0 {
+                    2
+                } else {
+                    FORMAT_VERSION
+                };
+                let k = entry_key(&self.keys, event.epoch, self.seals_seen, seg_v)?;
+                e.insert(hex::encode(k.as_bytes()));
+            }
+        }
+        if leaves.len() as u64 != end_seq - start_seq + 1 {
+            return Err(Error::Verification("segment bounds mismatch".into()));
+        }
+        if !has_nonseal {
+            // The only unsealed entries are prior seals — self-attesting
+            // artifacts; there is nothing new to attest.
+            return Ok(None);
+        }
+        let merkle_root = merkle::mth(&leaves);
+        let tip_hash = *leaves.last().expect("nonempty segment");
+
+        let record = seal::SealRecord {
+            segment: self.seals_seen,
+            start_seq,
+            end_seq,
+            tip_hash: hex::encode(tip_hash),
+            merkle_root: hex::encode(merkle_root),
+            revealed: epochs,
+            prev_seal,
+            scheme: signer.scheme().to_string(),
+            public_key: signer.public_key()?,
+            signature: String::new(),
+            payload: String::new(),
+        };
+        let record = seal::sign_record(record, signer)?;
+        let body = serde_json::to_string(&record)?;
+
+        // The seal opens the next segment: bump the index, then append
+        // under the new segment's key. append() uses `seals_seen`, so
+        // increment first.
+        self.seals_seen += 1;
+        self.sealed_through = end_seq;
+        let seq = self.append(SEAL_EVENT, &body)?;
+        if record.segment == 0 && self.legacy_segment0 {
+            // The published keys are epoch bases — public from now on.
+            self.revealed_epochs.extend(record.revealed.keys().copied());
+        }
+        Ok(Some(seq))
     }
 
     /// Return every entry in the ledger. Prefer `iter()` for large ledgers.

@@ -1,6 +1,6 @@
 [package]
 name = "sovereign_ledger"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Adam Clark <savagetism@icloud.com>"]
 repository = "https://github.com/savageAZfck/sovereign_ledger"
@@ -21,3 +21,10 @@ hex = "0.4"
 clap = { version = "4.5", features = ["derive"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+p256 = { version = "0.13", features = ["ecdsa"] }
+
+[dev-dependencies]
+hex = "0.4"
+hmac = "0.12"
+sha2 = "0.10"

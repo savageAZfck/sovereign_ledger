@@ -15,6 +15,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::seal::SealSigner;
 use crate::{Error, HASH_SIZE};
 
 /// A signed attestation over a ledger tip. The `payload` field is the
@@ -74,13 +75,8 @@ fn canonical_payload(tip: &Tip, signed_at: &str) -> String {
     )
 }
 
-/// Reconstruct the payload a checkpoint was signed over. Prefers the
-/// stored verbatim `payload`; falls back to rebuilding the legacy
-/// (pre-merkle_root) format for checkpoints written by older tooling.
-fn checkpoint_payload(c: &Checkpoint) -> String {
-    if !c.payload.is_empty() {
-        return c.payload.clone();
-    }
+/// Rebuild the canonical payload purely from a checkpoint's fields.
+fn rebuilt_payload(c: &Checkpoint) -> String {
     match &c.merkle_root {
         Some(root) => format!(
             "{{\"entry_count\": {}, \"genesis\": \"{}\", \"merkle_root\": \"{}\", \"signed_at\": \"{}\", \"tip_hash\": \"{}\"}}",
@@ -91,6 +87,24 @@ fn checkpoint_payload(c: &Checkpoint) -> String {
             c.entry_count, c.genesis, c.signed_at, c.tip_hash
         ),
     }
+}
+
+/// Reconstruct the payload a checkpoint was signed over. Prefers the
+/// stored verbatim `payload`; falls back to rebuilding the legacy
+/// (pre-merkle_root) format for checkpoints written by older tooling.
+fn checkpoint_payload(c: &Checkpoint) -> String {
+    if !c.payload.is_empty() {
+        return c.payload.clone();
+    }
+    rebuilt_payload(c)
+}
+
+/// A stored `payload` must be byte-identical to the canonical payload
+/// rebuilt from the checkpoint's own fields — otherwise a signature over
+/// an unrelated payload could be replayed onto a checkpoint claiming
+/// different values.
+fn payload_binds_fields(c: &Checkpoint) -> bool {
+    c.payload.is_empty() || c.payload == rebuilt_payload(c)
 }
 
 /// Write a checkpoint file atomically next to the ledger.
@@ -203,6 +217,9 @@ impl Anchor for IdentityAgentAnchor {
     }
 
     fn verify(&self, checkpoint: &Checkpoint) -> Result<bool, Error> {
+        if !payload_binds_fields(checkpoint) {
+            return Ok(false);
+        }
         let public_key = checkpoint
             .public_key
             .as_deref()
@@ -291,6 +308,136 @@ impl Anchor for FileKeyAnchor {
     }
 
     fn verify(&self, checkpoint: &Checkpoint) -> Result<bool, Error> {
+        if !payload_binds_fields(checkpoint) {
+            return Ok(false);
+        }
         Ok(self.mac(&checkpoint_payload(checkpoint)) == checkpoint.signature)
+    }
+}
+
+/// Asymmetric software anchor: Ed25519 signatures with a 32-byte seed in a
+/// 0600 key file. Unlike FileKeyAnchor the verification key is public —
+/// checkpoints and seals signed by this anchor can be verified by anyone
+/// holding only the public key, which makes this the preferred standalone
+/// anchor. The raw seed is all that is stored; the signing key and public
+/// key are derived from it.
+pub struct Ed25519FileAnchor {
+    signing: ed25519_dalek::SigningKey,
+}
+
+impl Ed25519FileAnchor {
+    /// Load an Ed25519 anchor from a 32-byte seed file.
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
+        let raw = std::fs::read(path)?;
+        let seed: [u8; 32] = raw
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Anchor("ed25519 key file must be 32 bytes".into()))?;
+        Ok(Self {
+            signing: ed25519_dalek::SigningKey::from_bytes(&seed),
+        })
+    }
+
+    /// Create a fresh Ed25519 anchor seed and write it to `path` (0600).
+    pub fn generate<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
+        let signing = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(path)?;
+            f.write_all(signing.to_bytes().as_slice())?;
+            f.sync_all()?;
+        }
+        Ok(Self { signing })
+    }
+
+    /// Hex-encoded public key — safe to publish.
+    pub fn public_key_hex(&self) -> String {
+        hex::encode(self.signing.verifying_key().to_bytes())
+    }
+}
+
+impl Anchor for Ed25519FileAnchor {
+    fn attest(&self, tip: &Tip) -> Result<Checkpoint, Error> {
+        use ed25519_dalek::Signer;
+        let signed_at = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, false);
+        let payload = canonical_payload(tip, &signed_at);
+        let signature = hex::encode(self.signing.sign(payload.as_bytes()).to_bytes());
+        Ok(Checkpoint {
+            entry_count: tip.entry_count,
+            genesis: tip.genesis.clone(),
+            tip_hash: hex::encode(tip.tip_hash),
+            merkle_root: Some(hex::encode(tip.merkle_root)),
+            signed_at,
+            scheme: "ed25519-file".into(),
+            public_key: Some(self.public_key_hex()),
+            signature,
+            payload,
+        })
+    }
+
+    fn verify(&self, checkpoint: &Checkpoint) -> Result<bool, Error> {
+        use ed25519_dalek::{Signature, Verifier};
+        if checkpoint.scheme != "ed25519-file" || !payload_binds_fields(checkpoint) {
+            return Ok(false);
+        }
+        let sig_bytes: [u8; 64] = match hex::decode(&checkpoint.signature)
+            .ok()
+            .and_then(|v| v.as_slice().try_into().ok())
+        {
+            Some(b) => b,
+            None => return Ok(false),
+        };
+        Ok(self
+            .signing
+            .verifying_key()
+            .verify(
+                checkpoint_payload(checkpoint).as_bytes(),
+                &Signature::from_bytes(&sig_bytes),
+            )
+            .is_ok())
+    }
+}
+
+impl SealSigner for IdentityAgentAnchor {
+    fn scheme(&self) -> &'static str {
+        "secure-enclave"
+    }
+    fn public_key(&self) -> Result<String, Error> {
+        IdentityAgentAnchor::public_key(self)
+    }
+    fn sign(&self, payload: &[u8]) -> Result<String, Error> {
+        self.sign(&B64.encode(payload))
+    }
+}
+
+impl SealSigner for FileKeyAnchor {
+    fn scheme(&self) -> &'static str {
+        "hmac-sha256"
+    }
+    fn public_key(&self) -> Result<String, Error> {
+        Ok(self.key_id())
+    }
+    fn sign(&self, payload: &[u8]) -> Result<String, Error> {
+        Ok(self.mac(
+            std::str::from_utf8(payload)
+                .map_err(|e| Error::Anchor(format!("seal payload is not utf-8: {e}")))?,
+        ))
+    }
+}
+
+impl SealSigner for Ed25519FileAnchor {
+    fn scheme(&self) -> &'static str {
+        "ed25519-file"
+    }
+    fn public_key(&self) -> Result<String, Error> {
+        Ok(self.public_key_hex())
+    }
+    fn sign(&self, payload: &[u8]) -> Result<String, Error> {
+        use ed25519_dalek::Signer;
+        Ok(hex::encode(self.signing.sign(payload).to_bytes()))
     }
 }
