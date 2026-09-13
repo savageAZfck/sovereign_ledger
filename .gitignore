@@ -1,7 +1,13 @@
-Rust/Cargo 
-/target **/*.rs.bk
-IDE/Editor junk 
-*.swp *.swo .DS_Store .idea/ .vscode/
-Byproduct files 
-*.log Cargo.lock
+# Rust/Cargo
+/target
+*.rs.bk
 
+# IDE/editor junk
+*.swp
+*.swo
+.DS_Store
+.idea/
+.vscode/
+
+# Byproduct files
+*.log
