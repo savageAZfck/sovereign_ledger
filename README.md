@@ -200,8 +200,19 @@ verify_proofs`); CI runs both as smoke tests.
 ## Install
 
 - Build from source: `cargo build --release` → `target/release/sovereign_ledger`
-- Releases: unsigned universal macOS binaries with SHA256SUMS on the
-  GitHub Releases page (`xattr -d com.apple.quarantine` after download).
+- Releases: universal macOS binaries with SHA256SUMS on the GitHub
+  Releases page (`xattr -d com.apple.quarantine` after download).
+  Release artifacts are **keyless-signed with Sigstore** from CI — verify
+  before running:
+
+  ```sh
+  cosign verify-blob \
+    --bundle sovereign_ledger-vX.Y.Z-macos-universal.tar.gz.sigstore.json \
+    --certificate-identity-regexp 'github.com/savageAZfck/sovereign_ledger' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    sovereign_ledger-vX.Y.Z-macos-universal.tar.gz
+  ```
+
 - Homebrew: `brew install savageAZfck/tap/sovereign-ledger`
 
 ## License

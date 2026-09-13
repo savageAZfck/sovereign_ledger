@@ -12,11 +12,13 @@ jobs:
     runs-on: macos-14
     permissions:
       contents: write
+      id-token: write # cosign keyless OIDC identity
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: sigstore/cosign-installer@v4.1.2
       - name: Build universal binary
         run: |
           cargo build --release --target aarch64-apple-darwin
@@ -28,12 +30,20 @@ jobs:
             -output dist/sovereign_ledger
           tar -czf "dist/sovereign_ledger-${GITHUB_REF_NAME}-macos-universal.tar.gz" -C dist sovereign_ledger
           (cd dist && shasum -a 256 *.tar.gz > SHA256SUMS.txt)
+      - name: Sign artifacts (keyless, Rekor-logged)
+        run: |
+          cosign sign-blob --yes \
+            --bundle "dist/sovereign_ledger-${GITHUB_REF_NAME}-macos-universal.tar.gz.sigstore.json" \
+            "dist/sovereign_ledger-${GITHUB_REF_NAME}-macos-universal.tar.gz"
+          cosign sign-blob --yes \
+            --bundle "dist/SHA256SUMS.txt.sigstore.json" \
+            dist/SHA256SUMS.txt
       - name: Upload release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
-            --notes "Unsigned universal macOS binary. Verify against SHA256SUMS.txt; remove quarantine after download (xattr -d com.apple.quarantine)." \
-            dist/*.tar.gz dist/SHA256SUMS.txt || \
-          gh release upload "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS.txt --clobber
+            --notes "Universal macOS binary, keyless-signed via Sigstore from this repo's CI. Verify: cosign verify-blob --bundle <artifact>.sigstore.json --certificate-identity-regexp 'github.com/savageAZfck/sovereign_ledger' --certificate-oidc-issuer https://token.actions.githubusercontent.com <artifact>. Remove quarantine after download (xattr -d com.apple.quarantine)." \
+            dist/* || \
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber

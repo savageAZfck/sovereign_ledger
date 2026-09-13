@@ -1,5 +1,22 @@
 # Security Policy
 
+## Release verification
+
+Release artifacts are signed keylessly via Sigstore in CI — the signature
+certificate is bound to this repository's GitHub Actions identity and
+logged in the Rekor transparency log. Verify any downloaded artifact:
+
+```sh
+cosign verify-blob \
+  --bundle <artifact>.sigstore.json \
+  --certificate-identity-regexp 'github.com/savageAZfck/sovereign_ledger' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  <artifact>
+```
+
+A mismatch means the artifact did not come from this repo's release
+workflow.
+
 ## Reporting a vulnerability
 
 Email **savagetism@icloud.com** with the subject line
