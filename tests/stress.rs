@@ -501,6 +501,71 @@ fn streaming_iter_matches_dump() {
 }
 
 #[test]
+fn journald_import_realistic_records() {
+    let path = temp_path("journald.jsonl");
+    cleanup(&path);
+
+    // Representative `journalctl -o json` lines.
+    let lines: Vec<String> = [
+        r#"{"__REALTIME_TIMESTAMP":"1690000000000000","SYSLOG_IDENTIFIER":"sshd","MESSAGE":"Accepted publickey for user","PRIORITY":"6"}"#,
+        r#"{"__REALTIME_TIMESTAMP":"1690000001000000","SYSLOG_IDENTIFIER":"kernel","MESSAGE":"audit: type=1300","PRIORITY":"5"}"#,
+        r#"{"__REALTIME_TIMESTAMP":"1690000002000000","MESSAGE":"no identifier here"}"#,
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    write_lines(&path, &lines);
+
+    let out = temp_path("journald_out.jsonl");
+    let mut ledger = SovereignLedger::new(&out, Some(b"stress")).unwrap();
+    let reader = BufReader::new(fs::File::open(&path).unwrap());
+    let report = sovereign_ledger::import::import_journald(reader, &mut ledger).unwrap();
+    assert_eq!(report.entries, 3);
+    ledger.verify().unwrap();
+
+    let dump = ledger.dump().unwrap();
+    assert_eq!(dump[0].event_type, "sshd");
+    assert_eq!(dump[2].event_type, "journald"); // fallback when SYSLOG_IDENTIFIER absent
+    assert!(dump[0].body.contains("Accepted publickey"));
+
+    // Garbage input fails closed.
+    let bad = temp_path("journald_bad.jsonl");
+    write_lines(&bad, &[r#"{"not": "closed"#.to_string()]);
+    let mut ledger2 = SovereignLedger::new(&temp_path("journald_out2.jsonl"), Some(b"s")).unwrap();
+    let reader = BufReader::new(fs::File::open(&bad).unwrap());
+    assert!(sovereign_ledger::import::import_journald(reader, &mut ledger2).is_err());
+
+    cleanup(&path);
+    cleanup(&out);
+    cleanup(&bad);
+    cleanup(&temp_path("journald_out2.jsonl"));
+}
+
+#[test]
+fn badapple_import_via_adapter() {
+    // A minimal Python-era-style Bad Apple line: sha256 over the body minus
+    // the hash field, chained from the bad-apple genesis.
+    use sha2::{Digest, Sha256};
+    let genesis = hex::encode(Sha256::digest(b"bad-apple-genesis-v1"));
+    let body =
+        format!("{{\"ts\":1,\"type\":\"audit\",\"data\":{{\"x\":1}},\"prev_hash\":\"{genesis}\"}}");
+    let hash = hex::encode(Sha256::digest(body.as_bytes()));
+    let line = format!("{},\"hash\":\"{}\"}}", &body[..body.len() - 1], hash);
+
+    let src = temp_path("ba_src.jsonl");
+    write_lines(&src, &[line]);
+    let out = temp_path("ba_out.jsonl");
+    let mut ledger = SovereignLedger::new(&out, Some(b"stress")).unwrap();
+    let reader = BufReader::new(fs::File::open(&src).unwrap());
+    let report = sovereign_ledger::import::import_badapple(reader, &[], &mut ledger).unwrap();
+    assert_eq!(report.entries, 1);
+    assert_eq!(report.source_tip, hash);
+    ledger.verify().unwrap();
+    cleanup(&src);
+    cleanup(&out);
+}
+
+#[test]
 fn empty_and_single_entry() {
     let path = temp_path("empty.jsonl");
     cleanup(&path);

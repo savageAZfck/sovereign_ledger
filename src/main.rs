@@ -221,7 +221,9 @@ fn pick_anchor(
         Ok(Box::new(a))
     } else {
         Err(Error::Anchor(
-            "no anchor available: agent socket absent and no --key-file given".into(),
+            "no anchor available: identity agent socket absent; use --key-file <path> \
+             for a software anchor or --gen-key-file <path> to create one"
+                .into(),
         ))
     }
 }
