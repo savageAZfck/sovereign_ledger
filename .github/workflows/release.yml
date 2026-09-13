@@ -1,0 +1,37 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - name: Build universal binary
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create \
+            target/aarch64-apple-darwin/release/sovereign_ledger \
+            target/x86_64-apple-darwin/release/sovereign_ledger \
+            -output dist/sovereign_ledger
+          tar -czf "dist/sovereign_ledger-${GITHUB_REF_NAME}-macos-universal.tar.gz" -C dist sovereign_ledger
+          (cd dist && shasum -a 256 *.tar.gz > SHA256SUMS.txt)
+      - name: Upload release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Unsigned universal macOS binary. Verify against SHA256SUMS.txt; remove quarantine after download (xattr -d com.apple.quarantine)." \
+            dist/*.tar.gz dist/SHA256SUMS.txt || \
+          gh release upload "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS.txt --clobber

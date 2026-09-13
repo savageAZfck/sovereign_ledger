@@ -344,6 +344,162 @@ fn reopen_appends() {
     cleanup(&path);
 }
 
+/// v1 (legacy ad-hoc hash) entries must still verify, and new appends
+/// must continue the same chain as v2.
+#[test]
+fn v1_v2_mixed_chain() {
+    use sha2::{Digest, Sha256};
+    let path = temp_path("mixed.jsonl");
+    cleanup(&path);
+
+    // Hand-craft three v1 entries exactly as the old writer did.
+    let key = {
+        let mut k = b"SOVEREIGN_LEDGER:".to_vec();
+        k.extend_from_slice(b"mix");
+        Sha256::digest(k)
+    };
+    let mut prev = [0u8; 32];
+    let mut lines = Vec::new();
+    for i in 1..=3u64 {
+        let ts = 1_700_000_000u64 + i;
+        let mut h = Sha256::new();
+        h.update(prev);
+        h.update(i.to_le_bytes());
+        h.update(ts.to_le_bytes());
+        h.update(b"legacy");
+        h.update(format!("entry {i}").as_bytes());
+        h.update(key);
+        let hash: [u8; 32] = h.finalize().into();
+        lines.push(format!(
+            "{{\"seq\":{i},\"ts\":{ts},\"event_type\":\"legacy\",\"body\":\"entry {i}\",\"prev_hash\":\"{}\",\"hash\":\"{}\"}}",
+            hex::encode(prev),
+            hex::encode(hash)
+        ));
+        prev = hash;
+    }
+    write_lines(&path, &lines);
+
+    let mut ledger = SovereignLedger::new(&path, Some(b"mix")).unwrap();
+    assert!(!ledger.is_compromised());
+    ledger.verify().unwrap();
+    // Appending continues the chain at v2.
+    ledger.append("modern", "new entry").unwrap();
+    ledger.verify().unwrap();
+    let dump = ledger.dump().unwrap();
+    assert_eq!(dump.len(), 4);
+    assert_eq!(dump[0].v, 1);
+    assert_eq!(dump[3].v, 2);
+    cleanup(&path);
+}
+
+#[test]
+fn key_epoch_rotation() {
+    let path = temp_path("epoch.jsonl");
+    cleanup(&path);
+
+    {
+        let mut ledger = SovereignLedger::new(&path, Some(b"epoch-a")).unwrap();
+        ledger.append("e", "before").unwrap();
+        assert_eq!(ledger.rotate_key(b"epoch-b").unwrap(), 1);
+        ledger.append("e", "after").unwrap();
+    }
+
+    // Both epochs verify with the full keyring.
+    let ledger =
+        SovereignLedger::open_with_seeds(&path, &[b"epoch-a".as_slice(), b"epoch-b".as_slice()])
+            .unwrap();
+    ledger.verify().unwrap();
+    assert_eq!(ledger.epoch(), 1);
+    drop(ledger);
+
+    // Missing the epoch-1 seed fails closed at open.
+    assert!(SovereignLedger::new(&path, Some(b"epoch-a")).is_err());
+    cleanup(&path);
+}
+
+#[test]
+fn merkle_proofs_roundtrip() {
+    use sovereign_ledger::merkle;
+    let path = temp_path("merkle.jsonl");
+    cleanup(&path);
+    make_ledger(&path, 50);
+
+    let ledger = SovereignLedger::new(&path, Some(b"stress")).unwrap();
+    let root = ledger.merkle_root().unwrap();
+
+    // Inclusion proof for an entry verifies against the root.
+    let proof = ledger.prove_inclusion(25).unwrap();
+    let leaves = ledger.leaf_hashes().unwrap();
+    proof.verify(&leaves[24], &root).unwrap();
+    // Wrong leaf fails.
+    assert!(proof.verify(&leaves[30], &root).is_err());
+
+    // Consistency: tree at 20 is a prefix of tree at 50.
+    let old_root = merkle::mth(&leaves[..20]);
+    let cproof = ledger.prove_consistency(20).unwrap();
+    cproof.verify(&old_root, &root).unwrap();
+    // Same proof must not verify against a truncated new tree.
+    assert!(cproof
+        .verify(&old_root, &merkle::mth(&leaves[..30]))
+        .is_err());
+    cleanup(&path);
+}
+
+#[test]
+fn file_key_anchor_roundtrip() {
+    use sovereign_ledger::anchor::{Anchor, FileKeyAnchor, Tip};
+    let path = temp_path("anchor.jsonl");
+    let key_path = temp_path("anchor.key");
+    cleanup(&path);
+    let _ = fs::remove_file(&key_path);
+    make_ledger(&path, 10);
+
+    let ledger = SovereignLedger::new(&path, Some(b"stress")).unwrap();
+    let tip = Tip {
+        tip_hash: ledger.last_hash(),
+        merkle_root: ledger.merkle_root().unwrap(),
+        entry_count: ledger.len(),
+        genesis: "test-genesis".into(),
+    };
+
+    let anchor = FileKeyAnchor::generate(&key_path).unwrap();
+    let checkpoint = anchor.attest(&tip).unwrap();
+    assert_eq!(checkpoint.scheme, "hmac-sha256");
+    assert!(anchor.verify(&checkpoint).unwrap());
+
+    // A checkpoint over a different tip must not verify.
+    let mut bad = checkpoint.clone();
+    bad.tip_hash = "0".repeat(64);
+    bad.payload.clear(); // force payload reconstruction
+    assert!(!anchor.verify(&bad).unwrap());
+    // Wrong key file fails.
+    let other = FileKeyAnchor::generate(temp_path("anchor2.key")).unwrap();
+    assert!(!other.verify(&checkpoint).unwrap());
+
+    let _ = fs::remove_file(&key_path);
+    let _ = fs::remove_file(temp_path("anchor2.key"));
+    cleanup(&path);
+}
+
+#[test]
+fn streaming_iter_matches_dump() {
+    let path = temp_path("iter.jsonl");
+    cleanup(&path);
+    make_ledger(&path, 1000);
+
+    let ledger = SovereignLedger::new(&path, Some(b"stress")).unwrap();
+    let via_iter: Vec<_> = ledger.iter().unwrap().map(|r| r.unwrap().hash).collect();
+    let via_dump: Vec<_> = ledger
+        .dump()
+        .unwrap()
+        .iter()
+        .map(|e| e.hash.clone())
+        .collect();
+    assert_eq!(via_iter, via_dump);
+    assert_eq!(via_iter.len(), 1000);
+    cleanup(&path);
+}
+
 #[test]
 fn empty_and_single_entry() {
     let path = temp_path("empty.jsonl");
