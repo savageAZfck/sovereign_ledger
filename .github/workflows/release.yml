@@ -45,5 +45,5 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --notes "Universal macOS binary, keyless-signed via Sigstore from this repo's CI. Verify: cosign verify-blob --bundle <artifact>.sigstore.json --certificate-identity-regexp 'github.com/savageAZfck/sovereign_ledger' --certificate-oidc-issuer https://token.actions.githubusercontent.com <artifact>. Remove quarantine after download (xattr -d com.apple.quarantine)." \
-            dist/* || \
-          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+            dist/*.tar.gz dist/*.sigstore.json dist/SHA256SUMS.txt || \
+          gh release upload "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sigstore.json dist/SHA256SUMS.txt --clobber
