@@ -1,5 +1,9 @@
 # sovereign_ledger
 
+> **Status: beta.** The on-disk format and API may still change between minor
+> versions. The cryptographic guarantees described below are implemented and
+> tested, but this has not yet had an external security audit.
+
 A standalone, hardened, hash-chained audit ledger for local-first and
 sovereign systems. Every entry is authenticated with HMAC-SHA256 and bound
 to the one before it; an RFC 6962 Merkle tree over the entry hashes gives
