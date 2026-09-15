@@ -221,5 +221,7 @@ verify_proofs`); CI runs both as smoke tests.
 
 ## License
 
-Proprietary — (c) 2026 Adam Clark.
+Functional Source License 1.1 (FSL-1.1-ALv2) — (c) 2026 Adam Clark.
+Source is open to read, use, and build on for any non-competing purpose;
+converts to Apache-2.0 automatically two years after release.
 Contact savagetism@icloud.com for licensing or partnership.
