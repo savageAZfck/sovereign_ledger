@@ -16,6 +16,7 @@ exclude = [
     "/archive",
     "/fuzz",
     "/web",
+    "/verifiers",
     "/.github",
 ]
 

@@ -77,3 +77,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # Cross-implementation conformance: the independent JS verifier must
+  # produce the same verdicts on every testvector.
+  js-verifier:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: node verifiers/js/verify.mjs --selftest testvectors

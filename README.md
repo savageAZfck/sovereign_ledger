@@ -16,7 +16,8 @@ inclusion and consistency proofs; an anchor interface seals the tip under
 an external key — including a Secure Enclave identity on macOS.
 
 **Format spec:** [`SPEC.md`](SPEC.md) · **Conformance vectors:**
-[`testvectors/`](testvectors/) · **Browser verifier:**
+[`testvectors/`](testvectors/) · **Independent verifiers:**
+[`verifiers/`](verifiers/) · **Browser verifier:**
 [`web/`](web/) · **Benchmarks:** `cargo bench`
 
 **v0.3: sealing + public verification.** `seal` closes a segment: it
@@ -243,8 +244,11 @@ The stress suite covers a 100k-entry append/verify pass, 16-process
 concurrent appends, lock blocking, truncated tails, six tamper variants,
 v1↔v2 mixed chains, key-epoch rotation, Merkle proof roundtrips, and
 anchor signing. [`testvectors/`](testvectors/) pins conformance —
-known-good and corrupted ledgers with declared outcomes — for
-third-party verifier implementations. `fuzz/` has libFuzzer targets for
+known-good and corrupted ledgers with declared outcomes — and
+[`verifiers/`](verifiers/) proves the format is independently
+implementable: a zero-dependency JavaScript verifier written against
+`SPEC.md` alone agrees with the Rust implementation on every vector.
+`fuzz/` has libFuzzer targets for
 the parser and the proof verifiers (`cargo fuzz run parse_event`,
 `cargo fuzz run verify_proofs`); CI runs both as smoke tests plus
 `cargo audit`, `cargo deny`, an MSRV (1.75) job, and a wasm32 check.

@@ -230,3 +230,8 @@ check (substring-matched: `broken hash chain`, `invalid ledger line`,
 ```
 cargo run --example gen_testvectors -- testvectors
 ```
+
+`verifiers/` holds implementations written against this spec alone —
+currently a zero-dependency JavaScript verifier that consumes the same
+vectors and agrees with the Rust implementation on every outcome
+(`node verifiers/js/verify.mjs --selftest testvectors`).
