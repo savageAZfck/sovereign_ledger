@@ -1,0 +1,134 @@
+{
+  "anchor_public_key": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+  "seeds": [
+    "vector-seed-0",
+    "vector-seed-1"
+  ],
+  "vectors": [
+    {
+      "file": "valid-basic.jsonl",
+      "keyed": {
+        "expect": "ok",
+        "seeds": [
+          "vector-seed-0"
+        ]
+      },
+      "public": {
+        "expect": "no_seals"
+      }
+    },
+    {
+      "file": "valid-rotated.jsonl",
+      "keyed": {
+        "expect": "ok",
+        "seeds": [
+          "vector-seed-0",
+          "vector-seed-1"
+        ]
+      },
+      "public": {
+        "expect": "no_seals"
+      }
+    },
+    {
+      "file": "valid-sealed.jsonl",
+      "keyed": {
+        "expect": "ok",
+        "seeds": [
+          "vector-seed-0"
+        ]
+      },
+      "public": {
+        "expect": "ok",
+        "segments": 2
+      }
+    },
+    {
+      "file": "valid-rotated-sealed.jsonl",
+      "keyed": {
+        "expect": "ok",
+        "seeds": [
+          "vector-seed-0",
+          "vector-seed-1"
+        ]
+      },
+      "public": {
+        "expect": "ok",
+        "segments": 1
+      }
+    },
+    {
+      "file": "broken-tampered-body.jsonl",
+      "keyed": {
+        "expect": "broken hash chain",
+        "seeds": [
+          "vector-seed-0"
+        ]
+      },
+      "public": {
+        "expect": "error"
+      }
+    },
+    {
+      "file": "broken-swapped-lines.jsonl",
+      "keyed": {
+        "expect": "broken hash chain",
+        "seeds": [
+          "vector-seed-0"
+        ]
+      },
+      "public": {
+        "expect": "error"
+      }
+    },
+    {
+      "file": "broken-truncated.jsonl",
+      "keyed": {
+        "expect": "invalid ledger line",
+        "seeds": [
+          "vector-seed-0"
+        ]
+      },
+      "public": {
+        "expect": "error"
+      }
+    },
+    {
+      "file": "broken-seal-body.jsonl",
+      "keyed": {
+        "expect": "broken hash chain",
+        "seeds": [
+          "vector-seed-0"
+        ]
+      },
+      "public": {
+        "expect": "tip_hash does not match"
+      }
+    },
+    {
+      "file": "broken-extra-field.jsonl",
+      "keyed": {
+        "expect": "invalid ledger line",
+        "seeds": [
+          "vector-seed-0"
+        ]
+      },
+      "public": {
+        "expect": "invalid ledger line"
+      }
+    },
+    {
+      "file": "broken-seq-gap.jsonl",
+      "keyed": {
+        "expect": "broken hash chain",
+        "seeds": [
+          "vector-seed-0"
+        ]
+      },
+      "public": {
+        "expect": "broken hash chain"
+      }
+    }
+  ],
+  "version": 1
+}

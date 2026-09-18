@@ -1,5 +1,10 @@
 # sovereign_ledger
 
+[![ci](https://github.com/savageAZfck/sovereign_ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/savageAZfck/sovereign_ledger/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/sovereign_ledger.svg)](https://crates.io/crates/sovereign_ledger)
+[![docs.rs](https://docs.rs/sovereign_ledger/badge.svg)](https://docs.rs/sovereign_ledger)
+[![license: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg)](LICENSE)
+
 > **Status: beta.** The on-disk format and API may still change between minor
 > versions. The cryptographic guarantees described below are implemented and
 > tested, but this has not yet had an external security audit.
@@ -10,6 +15,10 @@ to the one before it; an RFC 6962 Merkle tree over the entry hashes gives
 inclusion and consistency proofs; an anchor interface seals the tip under
 an external key — including a Secure Enclave identity on macOS.
 
+**Format spec:** [`SPEC.md`](SPEC.md) · **Conformance vectors:**
+[`testvectors/`](testvectors/) · **Browser verifier:**
+[`web/`](web/) · **Benchmarks:** `cargo bench`
+
 **v0.3: sealing + public verification.** `seal` closes a segment: it
 publishes that segment's derived key and binds the segment's Merkle root
 under an anchor signature. `verify --public` then verifies the whole sealed
@@ -19,6 +28,25 @@ only the public key. See `THREAT_MODEL.md` for the security model and
 
 Derived from the audit core of Bad Apple and battle-tested against its
 production ledger history (three legacy on-disk formats, ~7k live entries).
+
+## Quickstart
+
+```sh
+cargo add sovereign_ledger
+```
+
+```rust
+use sovereign_ledger::SovereignLedger;
+
+let mut ledger = SovereignLedger::new("audit.jsonl", Some(b"my-seed"))?;
+ledger.append("query", "user asked for the time")?;
+ledger.sync()?;
+ledger.verify()?;   // fail-closed: any tamper is an error, never a warning
+```
+
+Runnable examples live in [`examples/`](examples/): `append_and_seal`
+(end-to-end), `verify_ledger` (keyed), `verify_public` (key-free),
+`gen_testvectors` (regenerates `testvectors/`).
 
 ## What it guarantees
 
@@ -65,12 +93,15 @@ production ledger history (three legacy on-disk formats, ~7k live entries).
 v1 (legacy, verify-only):
   event.hash = SHA256(prev_hash || seq || ts || event_type || body || key)
 
-v2 (current):
+v2/v3 (current MAC construction):
   event.hash = HMAC-SHA256(key,
       "SL2" || prev_hash || seq:u64le || ts:u64le
             || len(event_type):u32le || event_type
             || len(body):u64le || body)
 ```
+
+(v3 keeps the v2 MAC but changes key derivation to per-segment keys —
+see below. The normative byte-level spec is [`SPEC.md`](SPEC.md).)
 
 - JSONL on disk — one event per line, append-only.
 - `v` is the format version (absent ⇒ 1); `epoch` selects the keyring slot.
@@ -186,6 +217,20 @@ Appends hit the filesystem cache by default — call `sync()` at batch
 boundaries, or `set_durable(true)` / `append --durable` to fsync every
 entry. Use durable mode where crash-loss of the last entry matters.
 
+## Portability
+
+`seal::verify_public` takes any `BufRead` — it never touches the
+filesystem. Build without the `fs` feature for the pure verification
+core (parsing, entry MACs, seals, Merkle proofs), which compiles to
+`wasm32-unknown-unknown` and powers the in-browser verifier in
+[`web/`](web/):
+
+```sh
+cargo check --no-default-features
+cargo check --target wasm32-unknown-unknown --features wasm
+wasm-pack build --target web --out-dir web/pkg -- --no-default-features --features wasm
+```
+
 ## Tests
 
 ```sh
@@ -197,9 +242,13 @@ cargo test
 The stress suite covers a 100k-entry append/verify pass, 16-process
 concurrent appends, lock blocking, truncated tails, six tamper variants,
 v1↔v2 mixed chains, key-epoch rotation, Merkle proof roundtrips, and
-anchor signing. `fuzz/` has libFuzzer targets for the parser and the
-proof verifiers (`cargo fuzz run parse_event`, `cargo fuzz run
-verify_proofs`); CI runs both as smoke tests.
+anchor signing. [`testvectors/`](testvectors/) pins conformance —
+known-good and corrupted ledgers with declared outcomes — for
+third-party verifier implementations. `fuzz/` has libFuzzer targets for
+the parser and the proof verifiers (`cargo fuzz run parse_event`,
+`cargo fuzz run verify_proofs`); CI runs both as smoke tests plus
+`cargo audit`, `cargo deny`, an MSRV (1.75) job, and a wasm32 check.
+Criterion benches for append and verify throughput: `cargo bench`.
 
 ## Install
 

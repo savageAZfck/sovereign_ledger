@@ -3,19 +3,30 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::error::Error as StdError;
 use std::fmt;
+#[cfg(feature = "fs")]
 use std::fs::{File, OpenOptions};
+#[cfg(feature = "fs")]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(all(feature = "fs", target_family = "unix"))]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(all(feature = "fs", target_family = "unix"))]
 use std::os::unix::io::AsRawFd;
+#[cfg(feature = "fs")]
 use std::path::{Path, PathBuf};
+#[cfg(feature = "fs")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "fs")]
 use std::time::{SystemTime, UNIX_EPOCH};
 use zeroize::Zeroize;
 
+#[cfg(feature = "fs")]
 pub mod anchor;
+#[cfg(feature = "fs")]
 pub mod import;
 pub mod merkle;
 pub mod seal;
+#[cfg(feature = "wasm")]
+pub mod wasm;
 
 pub const HASH_SIZE: usize = 32;
 /// Current on-disk entry format version. Version 3 uses per-segment key
@@ -104,7 +115,7 @@ fn unpin_bytes(ptr: *mut u8, bytes: usize) {
 #[cfg(not(target_family = "unix"))]
 fn unpin_bytes(_ptr: *mut u8, _bytes: usize) {}
 
-#[cfg(target_family = "unix")]
+#[cfg(all(feature = "fs", target_family = "unix"))]
 fn flock_ex(file: &File) -> Result<(), Error> {
     // Blocking exclusive lock: concurrent openers serialize rather than race
     // or spuriously fail. flock is released automatically on process death,
@@ -116,7 +127,7 @@ fn flock_ex(file: &File) -> Result<(), Error> {
     Ok(())
 }
 
-#[cfg(not(target_family = "unix"))]
+#[cfg(all(feature = "fs", not(target_family = "unix")))]
 fn flock_ex(_file: &File) -> Result<(), Error> {
     Ok(())
 }
@@ -161,6 +172,7 @@ impl Key {
 /// key reveals nothing about any other segment's key, including the open
 /// one. (An iterated ratchet `k_{s+1} = HMAC(k_s, …)` would instead make
 /// every future key publicly derivable from the first revealed key.)
+#[cfg(feature = "fs")]
 pub(crate) fn segment_key(base: &[u8; HASH_SIZE], segment: u64) -> [u8; HASH_SIZE] {
     let mut m = <Hmac<Sha256> as Mac>::new_from_slice(base)
         .unwrap_or_else(|_| unreachable!("HMAC accepts any key length"));
@@ -177,6 +189,7 @@ pub(crate) fn segment_key(base: &[u8; HASH_SIZE], segment: u64) -> [u8; HASH_SIZ
 /// directly; version ≥ 3 entries authenticate under the per-segment key
 /// for the segment containing them. A seal event is the first entry of
 /// the segment it opens, so its own segment index counts it.
+#[cfg(feature = "fs")]
 fn entry_key(base_keys: &[Key], epoch: u32, seals_seen: u64, version: u32) -> Result<Key, Error> {
     let base = base_keys
         .get(epoch as usize)
@@ -204,7 +217,11 @@ impl Drop for Key {
 /// ad-hoc keyed hash). Version 2 entries are authenticated with
 /// HMAC-SHA256 over length-prefixed fields. `epoch` selects which key in
 /// the supplied keyring authenticates the entry.
+///
+/// Unknown fields are rejected: the MAC covers exactly this field set, so
+/// any extra key would ride through verification unauthenticated.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Event {
     #[serde(default = "default_version")]
     pub v: u32,
@@ -222,6 +239,7 @@ fn default_version() -> u32 {
     1
 }
 
+#[cfg(feature = "fs")]
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -304,11 +322,13 @@ pub(crate) fn decode_hash(s: &str) -> Option<[u8; HASH_SIZE]> {
 }
 
 /// Streaming iterator over ledger entries — never materializes the whole file.
+#[cfg(feature = "fs")]
 pub struct LedgerIter {
     reader: BufReader<File>,
     line: usize,
 }
 
+#[cfg(feature = "fs")]
 impl Iterator for LedgerIter {
     type Item = Result<Event, Error>;
 
@@ -335,6 +355,7 @@ impl Iterator for LedgerIter {
 }
 
 /// Standalone hardened, hash-chained audit ledger.
+#[cfg(feature = "fs")]
 pub struct SovereignLedger {
     path: PathBuf,
     _lock: File,
@@ -359,6 +380,7 @@ pub struct SovereignLedger {
     durable: AtomicBool,
 }
 
+#[cfg(feature = "fs")]
 impl SovereignLedger {
     /// Open or create a ledger at `path` with a single epoch-0 key.
     /// If `key_seed` is supplied, the key is deterministic. Otherwise a
@@ -452,7 +474,7 @@ impl SovereignLedger {
                     Some(h) => h,
                     None => return Err(Error::InvalidLine(idx, "bad prev_hash".into())),
                 };
-                if prev_hash != last_hash {
+                if prev_hash != last_hash || event.seq != seq + 1 {
                     compromised = true;
                     break;
                 }
@@ -620,7 +642,10 @@ impl SovereignLedger {
                 Some(h) => h,
                 None => return Err(Error::InvalidLine(idx, "bad prev_hash".into())),
             };
-            if prev_hash != last_hash {
+            // Sequence numbers are canonical too: seq starts at 1 and
+            // increments by one per event. A gapped or renumbered seq is
+            // a chain break even when the MACs all check.
+            if prev_hash != last_hash || event.seq != idx as u64 + 1 {
                 return Err(Error::BrokenChain(idx));
             }
             let expected = event_hash(

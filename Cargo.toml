@@ -2,12 +2,31 @@
 name = "sovereign_ledger"
 version = "0.3.1"
 edition = "2021"
+rust-version = "1.75"
 authors = ["Adam Clark <savagetism@icloud.com>"]
 repository = "https://github.com/savageAZfck/sovereign_ledger"
+homepage = "https://github.com/savageAZfck/sovereign_ledger"
 license = "FSL-1.1-ALv2"
 description = "Standalone hardened, hash-chained audit ledger with memory-pinned keys, inter-process locking, and fail-closed verification"
 keywords = ["audit", "ledger", "tamper-evident", "hash-chain", "security"]
+categories = ["cryptography", "filesystem", "data-structures"]
 readme = "README.md"
+exclude = [
+    "/dist",
+    "/archive",
+    "/fuzz",
+    "/web",
+    "/.github",
+]
+
+[features]
+default = ["fs"]
+# File-backed ledger: SovereignLedger, inter-process locking, anchors,
+# foreign-ledger import, and the CLI binary. Disable for the pure
+# verification core (parsing, entry MACs, seals, Merkle proofs) — e.g. WASM.
+fs = ["dep:clap", "dep:chrono"]
+# JavaScript bindings (`verify_ledger_public`) for wasm-bindgen builds.
+wasm = ["dep:wasm-bindgen"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -18,13 +37,27 @@ zeroize = { version = "1.7", features = ["derive"] }
 rand = "0.8"
 libc = "0.2"
 hex = "0.4"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"], optional = true }
 base64 = "0.22"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
 ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 p256 = { version = "0.13", features = ["ecdsa"] }
+wasm-bindgen = { version = "0.2.100", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+[[bin]]
+name = "sovereign_ledger"
+required-features = ["fs"]
 
 [dev-dependencies]
 hex = "0.4"
 hmac = "0.12"
 sha2 = "0.10"
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
+
+[[bench]]
+name = "throughput"
+harness = false

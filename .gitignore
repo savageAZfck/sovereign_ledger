@@ -12,3 +12,6 @@ dist/
 
 # Byproduct files
 *.log
+
+# wasm-pack output for the browser verifier
+web/pkg/

@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>sovereign_ledger — public verifier</title>
+<style>
+  :root {
+    --bg: #0a0a0b;
+    --panel: #131316;
+    --border: #26262c;
+    --text: #e6e6e9;
+    --dim: #8a8a93;
+    --green: #4ade80;
+    --red: #f87171;
+    --accent: #a78bfa;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    display: flex; justify-content: center; padding: 48px 16px;
+  }
+  main { width: 100%; max-width: 720px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  h1 span { color: var(--dim); font-weight: 400; }
+  .sub { color: var(--dim); font-size: 13px; margin-bottom: 24px; }
+  #drop {
+    border: 1px dashed var(--border); border-radius: 10px;
+    background: var(--panel); padding: 36px 20px;
+    text-align: center; color: var(--dim); font-size: 14px;
+    transition: border-color .15s, color .15s;
+    cursor: pointer;
+  }
+  #drop.hover { border-color: var(--accent); color: var(--text); }
+  #drop strong { color: var(--text); font-weight: 500; }
+  textarea {
+    width: 100%; margin-top: 16px; min-height: 90px; resize: vertical;
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; font: inherit; font-size: 12px;
+  }
+  button {
+    margin-top: 12px; background: var(--accent); color: #0a0a0b;
+    border: 0; border-radius: 8px; padding: 9px 18px;
+    font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  button:disabled { opacity: .4; cursor: default; }
+  #result {
+    margin-top: 24px; border: 1px solid var(--border);
+    border-radius: 10px; background: var(--panel);
+    padding: 18px 20px; font-size: 13px; display: none;
+  }
+  #result.show { display: block; }
+  .verdict { font-size: 16px; font-weight: 600; margin-bottom: 10px; }
+  .verdict.ok { color: var(--green); }
+  .verdict.bad { color: var(--red); }
+  table { border-collapse: collapse; width: 100%; }
+  td { padding: 4px 8px 4px 0; vertical-align: top; }
+  td.k { color: var(--dim); white-space: nowrap; width: 1%; }
+  td.v { word-break: break-all; }
+  .err { color: var(--red); white-space: pre-wrap; word-break: break-all; }
+  footer { margin-top: 32px; color: var(--dim); font-size: 12px; line-height: 1.6; }
+  code { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>sovereign_ledger <span>— public verifier</span></h1>
+  <div class="sub">
+    verifies sealed audit ledgers entirely in your browser.
+    the file never leaves this page — no upload, no key material, no network.
+  </div>
+
+  <div id="drop">
+    <strong>drop a .jsonl ledger here</strong><br />
+    or click to choose a file
+  </div>
+  <input id="file" type="file" accept=".jsonl,.log,.txt" hidden />
+  <textarea id="paste" placeholder="…or paste ledger lines here" spellcheck="false"></textarea>
+  <button id="go" disabled>verify</button>
+
+  <div id="result"></div>
+
+  <footer>
+    sealed segments are checked end-to-end: entry MACs under the seal's
+    revealed keys, RFC&nbsp;6962 Merkle roots, chain tips, seal ordering, and
+    anchor signatures. the unsealed tail is linkage-checked and reported
+    separately — it carries no public guarantee until the next seal.
+    spec: <code>SPEC.md</code>. vectors: <code>testvectors/</code>.
+  </footer>
+</main>
+
+<script type="module">
+  import init, { verify_ledger_public } from './pkg/sovereign_ledger.js';
+
+  const drop = document.getElementById('drop');
+  const file = document.getElementById('file');
+  const paste = document.getElementById('paste');
+  const go = document.getElementById('go');
+  const result = document.getElementById('result');
+
+  await init();
+  go.disabled = false;
+
+  const escHtml = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  let content = '';
+  const setContent = (text, name) => {
+    content = text;
+    paste.value = '';
+    drop.innerHTML = `<strong>${escHtml(name)}</strong><br>${text.split('\n').filter(l => l.trim()).length} lines loaded — ready to verify`;
+  };
+
+  drop.addEventListener('click', () => file.click());
+  file.addEventListener('change', async () => {
+    if (file.files[0]) setContent(await file.files[0].text(), file.files[0].name);
+  });
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('hover'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('hover'));
+  drop.addEventListener('drop', async e => {
+    e.preventDefault(); drop.classList.remove('hover');
+    const f = e.dataTransfer.files[0];
+    if (f) setContent(await f.text(), f.name);
+  });
+  paste.addEventListener('input', () => { content = ''; });
+
+  // Report fields (scheme, public_key) come from the ledger itself —
+  // attacker-controlled content — so everything is escaped before it
+  // touches innerHTML.
+  const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const row = (k, v) => `<tr><td class="k">${esc(k)}</td><td class="v">${esc(v)}</td></tr>`;
+
+  go.addEventListener('click', () => {
+    const input = content || paste.value;
+    result.classList.add('show');
+    try {
+      const r = JSON.parse(verify_ledger_public(input));
+      const seg = r.segments === 0
+        ? 'no seals — linkage-checked only'
+        : `${r.segments} segment${r.segments > 1 ? 's' : ''} verified`;
+      result.innerHTML = `
+        <div class="verdict ok">VALID</div>
+        <table>
+          ${row('sealed entries', r.sealed_entries)}
+          ${row('unsealed entries', r.unsealed_entries)}
+          ${row('segments', seg)}
+          ${r.scheme ? row('anchor scheme', r.scheme) : ''}
+          ${r.public_key ? row('anchor key', r.public_key) : ''}
+        </table>
+        ${r.unsealed_entries ? `<p class="sub" style="margin:10px 0 0">
+          ${r.unsealed_entries} entr${r.unsealed_entries > 1 ? 'ies' : 'y'} after
+          the last seal — structurally sound, but not publicly anchored until the next seal.</p>` : ''}`;
+    } catch (e) {
+      result.innerHTML = `
+        <div class="verdict bad">INVALID</div>
+        <div class="err">${esc(e)}</div>`;
+    }
+  });
+</script>
+</body>
+</html>

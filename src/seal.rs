@@ -38,8 +38,10 @@ pub trait SealSigner {
     fn sign(&self, payload: &[u8]) -> Result<String, Error>;
 }
 
-/// The body of a `sovereign:seal` event.
+/// The body of a `sovereign:seal` event. Unknown fields are rejected —
+/// the signature covers the canonical field set only.
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct SealRecord {
     /// Segment index — number of seals recorded before this one.
     pub segment: u64,
@@ -142,7 +144,7 @@ pub fn verify_signature(
 }
 
 /// Outcome of a public (key-free) verification pass.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct PublicVerifyReport {
     /// Entries covered by a valid seal.
     pub sealed_entries: u64,
@@ -263,6 +265,7 @@ pub fn verify_public<R: BufRead>(reader: R) -> Result<PublicVerifyReport, Error>
         Ok(())
     };
 
+    let mut expected_seq = 1u64;
     for (this_line, line) in reader.lines().enumerate() {
         let line = line?;
         if line.trim().is_empty() {
@@ -272,9 +275,10 @@ pub fn verify_public<R: BufRead>(reader: R) -> Result<PublicVerifyReport, Error>
             .map_err(|e| Error::InvalidLine(this_line, e.to_string()))?;
         let prev_hash = decode_hash(&event.prev_hash)
             .ok_or_else(|| Error::InvalidLine(this_line, "bad prev_hash".into()))?;
-        if prev_hash != last_hash {
+        if prev_hash != last_hash || event.seq != expected_seq {
             return Err(Error::BrokenChain(this_line));
         }
+        expected_seq += 1;
         last_hash = decode_hash(&event.hash)
             .ok_or_else(|| Error::InvalidLine(this_line, "bad hash".into()))?;
 
