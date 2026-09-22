@@ -3,7 +3,7 @@
 [![ci](https://github.com/savageAZfck/sovereign_ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/savageAZfck/sovereign_ledger/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/sovereign_ledger.svg)](https://crates.io/crates/sovereign_ledger)
 [![docs.rs](https://docs.rs/sovereign_ledger/badge.svg)](https://docs.rs/sovereign_ledger)
-[![license: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg)](LICENSE)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 > **Status: beta.** The on-disk format and API may still change between minor
 > versions. The cryptographic guarantees described below are implemented and
@@ -274,7 +274,5 @@ Criterion benches for append and verify throughput: `cargo bench`.
 
 ## License
 
-Functional Source License 1.1 (FSL-1.1-ALv2) — (c) 2026 Adam Clark.
-Source is open to read, use, and build on for any non-competing purpose;
-converts to Apache-2.0 automatically two years after release.
-Contact savagetism@icloud.com for licensing or partnership.
+MIT License — (c) 2026 Adam Clark. See [LICENSE](LICENSE).
+Contact savagetism@icloud.com for collaboration or partnership.
