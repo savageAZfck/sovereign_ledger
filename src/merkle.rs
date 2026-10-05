@@ -38,7 +38,7 @@ fn largest_pow2_lt(n: u64) -> u64 {
 
 /// Merkle Tree Hash over a slice of leaf inputs, per RFC 6962 §2.1.
 /// MTH({}) = SHA256(""), MTH({d}) = SHA256(0x00 || d), and for n > 1 with
-/// k the largest power of two < n: MTH = SHA256(0x01 || MTH(D[0:k]) || MTH(D[k:n])).
+/// k the largest power of two < n: `MTH = SHA256(0x01 || MTH(D[0:k]) || MTH(D[k:n]))`.
 pub fn mth(d: &[[u8; HASH_SIZE]]) -> [u8; HASH_SIZE] {
     match d.len() {
         0 => Sha256::digest([]).into(),
@@ -183,7 +183,7 @@ fn subproof(m: u64, d: &[[u8; HASH_SIZE]], b: bool, out: &mut Vec<[u8; HASH_SIZE
     }
 }
 
-/// Minimal consistency proof that MTH(D[0:m]) is a prefix of MTH(D[0:n]).
+/// Minimal consistency proof that `MTH(D[0:m])` is a prefix of `MTH(D[0:n])`.
 pub fn consistency_proof(m: u64, d: &[[u8; HASH_SIZE]]) -> Vec<[u8; HASH_SIZE]> {
     let n = d.len() as u64;
     if m == 0 || m == n || m > n {
